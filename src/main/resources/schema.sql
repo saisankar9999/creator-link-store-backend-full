@@ -267,3 +267,101 @@ update products set price_cents=249900 where title='Strategy Session' and creato
 update orders set amount_cents=49900,fee_cents=998 where creator_id in (select id from creators where email like '%@example.test');
 
 create index if not exists idx_checkout_creator_created on checkout_sessions(creator_id,created_at desc);
+
+alter table checkout_sessions add column if not exists buyer_email varchar(255);
+alter table checkout_sessions add column if not exists buyer_name varchar(120);
+alter table checkout_sessions add column if not exists order_id bigint references orders(id);
+
+create table if not exists entitlements (
+  id bigserial primary key,
+  creator_id bigint not null references creators(id) on delete cascade,
+  product_id bigint not null references products(id) on delete cascade,
+  order_id bigint not null references orders(id) on delete cascade,
+  customer_id bigint references customers(id) on delete set null,
+  access_token varchar(64) unique not null,
+  status varchar(20) not null default 'active',
+  granted_at timestamptz not null default current_timestamp
+);
+
+create index if not exists idx_entitlements_token on entitlements(access_token);
+
+alter table checkout_sessions add column if not exists field_responses text;
+
+create table if not exists order_field_responses (
+  id bigserial primary key,
+  order_id bigint not null references orders(id) on delete cascade,
+  field_id bigint not null references product_checkout_fields(id) on delete cascade,
+  value varchar(2000) not null
+);
+
+alter table bookings add column if not exists product_id bigint references products(id);
+alter table checkout_sessions add column if not exists slot_id bigint references bookings(id);
+
+create table if not exists webinar_sessions (
+  id bigserial primary key,
+  product_id bigint not null references products(id) on delete cascade,
+  starts_at timestamptz not null,
+  ends_at timestamptz not null,
+  join_url varchar(2048) not null,
+  capacity integer not null default 0
+);
+
+create table if not exists webinar_registrations (
+  id bigserial primary key,
+  session_id bigint not null references webinar_sessions(id) on delete cascade,
+  customer_id bigint references customers(id) on delete set null,
+  order_id bigint not null references orders(id) on delete cascade
+);
+
+alter table checkout_sessions add column if not exists plan_id bigint references product_payment_plans(id);
+
+create table if not exists membership_subscriptions (
+  id bigserial primary key,
+  product_id bigint not null references products(id) on delete cascade,
+  customer_id bigint references customers(id) on delete set null,
+  order_id bigint not null references orders(id) on delete cascade,
+  plan_id bigint not null references product_payment_plans(id),
+  current_period_end timestamptz not null,
+  status varchar(20) not null default 'active'
+);
+
+create table if not exists course_modules (
+  id bigserial primary key,
+  product_id bigint not null references products(id) on delete cascade,
+  title varchar(120) not null,
+  position integer not null default 0
+);
+
+create table if not exists course_lessons (
+  id bigserial primary key,
+  module_id bigint not null references course_modules(id) on delete cascade,
+  title varchar(120) not null,
+  video_url varchar(2048),
+  content varchar(4000),
+  position integer not null default 0
+);
+
+create table if not exists course_enrollments (
+  id bigserial primary key,
+  product_id bigint not null references products(id) on delete cascade,
+  customer_id bigint references customers(id) on delete set null,
+  order_id bigint not null references orders(id) on delete cascade
+);
+
+create table if not exists lesson_progress (
+  id bigserial primary key,
+  enrollment_id bigint not null references course_enrollments(id) on delete cascade,
+  lesson_id bigint not null references course_lessons(id) on delete cascade,
+  completed_at timestamptz not null default current_timestamp,
+  unique(enrollment_id,lesson_id)
+);
+
+create table if not exists sessions (
+  id varchar(64) primary key,
+  creator_id bigint not null references creators(id) on delete cascade,
+  created_at timestamptz not null default current_timestamp,
+  expires_at timestamptz not null,
+  revoked_at timestamptz
+);
+
+create index if not exists idx_sessions_creator on sessions(creator_id);

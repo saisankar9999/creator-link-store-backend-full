@@ -4,14 +4,24 @@ Spring Boot API for the sectioned creator admin, public storefront, products, cu
 
 ```bash
 docker compose up -d db
-mvn spring-boot:run
+DB_USER=creator DB_PASSWORD=creator mvn spring-boot:run
 ```
 
-It listens on port 8080 and its inferred PostgreSQL schema is initialized from `src/main/resources/schema.sql`. A clean database seeds the deterministic `alex` demo. This schema and its response bodies are original project contracts, not a claim about Stan's private database or responses.
+It listens on port 8080 and its inferred PostgreSQL schema is initialized from `src/main/resources/schema.sql`. A clean database seeds the deterministic `alex` demo (its password is a random, intentionally-unusable value — register a real account via `POST /api/auth/register` and log in through `POST /api/auth/login` to get a usable session).
 
 India launch defaults are `INR`, Razorpay as the preferred strategy, and both payments and Instagram disabled. `GET /api/v1/payments/config` and `GET /api/v1/integrations/instagram/config` report safe readiness without secrets. Provider modes are `disabled`, `test`, and `live`; use test credentials locally and store deployed secrets in AWS Secrets Manager. Checkout amounts are always loaded server-side and expressed as integer paise in `*_subunits` fields.
 
-For the complete three-container workflow and API reference, start with the [infrastructure repository](https://github.com/kvsram/creator-link-store-infrastructure). Its bootstrap script clones all missing siblings, validates the laptop, starts the three containers, and runs the supported-contract smoke test. Its feature-parity matrix is the source of truth for what is complete versus a route/schema foundation.
+## Authentication
+
+`POST /api/auth/register` creates a creator (BCrypt-hashed password). `POST /api/auth/login` (handle-or-email + password) issues an httpOnly session cookie backed by the `sessions` table (30-day opaque token, hashed at rest — no JWT, no extra secret to manage). `POST /api/auth/logout` revokes it, `GET /api/auth/me` returns the current profile. Every `/api/v1/**` route requires this session except the public/webhook/checkout paths a buyer or payment provider needs to hit anonymously — see `identity/AuthInterceptor.java` for the exact allowlist. There is no client-supplied `creatorId` trusted anywhere anymore; it's always resolved server-side from the session.
+
+## Product types
+
+All 8 types (`digital-download`, `lead-magnet`, `fulfillment`, `meeting`, `webinar`, `community`, `membership`, `course`) have real, working flows end to end — not just an accepted label. Each paid order grants a buyer an `entitlements` row with a random access token; `GET /api/buyer/access/{token}` (and type-specific sub-routes: file downloads, curriculum, booking, webinar join link, membership status) serves the purchased content with no buyer login required. See `CreatorStoreApplication.java` for the full endpoint list and `commerce/OrderFulfillmentService.java` for how a webhook-confirmed payment turns into an order, customer, and entitlement.
+
+## Deployment
+
+For the complete containerized dev workflow (three containers, smoke test), start with the [infrastructure repository](https://github.com/kvsram/creator-link-store-infrastructure). For an actual production deployment, see [`infrastructure/production/README.md`](https://github.com/kvsram/creator-link-store-infrastructure/tree/main/production) — a simple single-VM setup (Caddy for TLS + a managed Postgres), not the full multi-region AWS/EKS path.
 
 ## Regional Kubernetes deployment
 

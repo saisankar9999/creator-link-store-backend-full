@@ -2,6 +2,7 @@ package dev.creatorstore;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.creatorstore.commerce.OrderFulfillmentService;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
@@ -21,10 +22,10 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.*;
 
 @RestController
-@CrossOrigin(origins = {"http://localhost:5173", "http://localhost:3000"})
 class ExternalIntegrationController {
   private final JdbcTemplate db;
   private final ObjectMapper json;
+  private final OrderFulfillmentService fulfillment;
   private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
 
   @Value("${payments.mode:disabled}") String paymentMode;
@@ -45,9 +46,10 @@ class ExternalIntegrationController {
   @Value("${instagram.verify-token:}") String instagramVerifyToken;
   @Value("${instagram.test-recipient-ids:}") String instagramTestRecipientIds;
 
-  ExternalIntegrationController(JdbcTemplate db, ObjectMapper json) {
+  ExternalIntegrationController(JdbcTemplate db, ObjectMapper json, OrderFulfillmentService fulfillment) {
     this.db = db;
     this.json = json;
+    this.fulfillment = fulfillment;
   }
 
   @GetMapping("/api/v1/payments/config")
@@ -70,6 +72,8 @@ class ExternalIntegrationController {
     if (!Set.of("test", "live").contains(paymentMode)) return unavailable("Payments are disabled; no charge was attempted.");
     if (idempotencyKey.isBlank() || idempotencyKey.length() > 120)
       return ResponseEntity.badRequest().body(Map.of("error", "Idempotency-Key is required and must be at most 120 characters."));
+    if (input.buyerEmail()==null || !input.buyerEmail().contains("@"))
+      return ResponseEntity.badRequest().body(Map.of("error", "A valid buyerEmail is required."));
     List<Map<String,Object>> existing = db.queryForList("select id,provider,provider_session_id,currency,amount_subunits,status from checkout_sessions where creator_id=? and idempotency_key=?", input.creatorId(), idempotencyKey);
     if (!existing.isEmpty()) return ResponseEntity.ok(existing.get(0));
 
@@ -79,6 +83,11 @@ class ExternalIntegrationController {
     String currency = String.valueOf(product.get("currency")).trim().toUpperCase(Locale.ROOT);
     if (!currency.equals("INR")) return ResponseEntity.badRequest().body(Map.of("error", "India launch checkout currently requires INR."));
     int amount = ((Number) product.get("amount_subunits")).intValue();
+    if (input.planId() != null) {
+      List<Map<String,Object>> plans = db.queryForList("select amount_cents from product_payment_plans where id=? and product_id=?", input.planId(), input.productId());
+      if (plans.isEmpty()) return ResponseEntity.badRequest().body(Map.of("error", "Plan not found for this product."));
+      amount = ((Number) plans.get(0).get("amount_cents")).intValue();
+    }
     if (amount <= 0) return ResponseEntity.badRequest().body(Map.of("error", "Free products do not use a payment gateway."));
     String provider = optional(input.provider(), defaultProvider).toLowerCase(Locale.ROOT);
     if (!Set.of("razorpay", "stripe").contains(provider)) return ResponseEntity.badRequest().body(Map.of("error", "provider must be razorpay or stripe"));
@@ -86,9 +95,10 @@ class ExternalIntegrationController {
     if (provider.equals("stripe") && !stripeConfigured()) return unavailable("Stripe test/live credentials are not configured; no charge was attempted.");
 
     String checkoutId = UUID.randomUUID().toString();
+    String fieldResponsesJson = toJsonOrNull(input.fieldResponses());
     try {
-      db.update("insert into checkout_sessions(id,creator_id,product_id,provider,idempotency_key,currency,amount_subunits,status) values(?,?,?,?,?,?,?,?)",
-          checkoutId, input.creatorId(), input.productId(), provider, idempotencyKey, currency, amount, "creating");
+      db.update("insert into checkout_sessions(id,creator_id,product_id,provider,idempotency_key,currency,amount_subunits,status,buyer_email,buyer_name,field_responses,slot_id,plan_id) values(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+          checkoutId, input.creatorId(), input.productId(), provider, idempotencyKey, currency, amount, "creating", input.buyerEmail().trim().toLowerCase(), optional(input.buyerName(), ""), fieldResponsesJson, input.slotId(), input.planId());
     } catch (DataIntegrityViolationException concurrentRequest) {
       return ResponseEntity.ok(db.queryForMap("select id,provider,provider_session_id,currency,amount_subunits,status from checkout_sessions where creator_id=? and idempotency_key=?", input.creatorId(), idempotencyKey));
     }
@@ -123,7 +133,12 @@ class ExternalIntegrationController {
     boolean verified = Signatures.verifyHexHmac(razorpayKeySecret, input.orderId()+"|"+input.paymentId(), input.signature());
     if (!verified) return ResponseEntity.status(401).body(Map.of("verified", false));
     db.update("update checkout_sessions set status='browser_verified',updated_at=current_timestamp where provider='razorpay' and provider_session_id=?", input.orderId());
-    return ResponseEntity.ok(Map.of("verified", true, "final_status_source", "verified_webhook"));
+    String accessToken = fulfillment.recordPaidOrder("razorpay", input.orderId());
+    Map<String,Object> body = new LinkedHashMap<>();
+    body.put("verified", true);
+    body.put("final_status_source", "verified_webhook");
+    if (accessToken != null) body.put("access_token", accessToken);
+    return ResponseEntity.ok(body);
   }
 
   @PostMapping("/api/v1/webhooks/razorpay")
@@ -238,7 +253,7 @@ class ExternalIntegrationController {
       try { db.update("insert into provider_events(provider,event_key,event_type,payload_sha256,signature_verified) values(?,?,?,?,true)", provider, hash, type, hash); }
       catch (DataIntegrityViolationException duplicate) { return ResponseEntity.ok(Map.of("received", true, "duplicate", true)); }
       if (!providerSessionId.isBlank() && Set.of("order.paid", "payment.captured", "checkout.session.completed").contains(type))
-        db.update("update checkout_sessions set status='paid',updated_at=current_timestamp where provider=? and provider_session_id=?", provider, providerSessionId);
+        fulfillment.recordPaidOrder(provider, providerSessionId);
       return ResponseEntity.ok(Map.of("received", true));
     } catch (Exception e) { return ResponseEntity.badRequest().body(Map.of("error", "invalid JSON payload")); }
   }
@@ -248,10 +263,11 @@ class ExternalIntegrationController {
   private boolean instagramConfigured() { return !instagramAccountId.isBlank() && !instagramAccessToken.isBlank() && !instagramAppSecret.isBlank(); }
   private Set<String> testRecipients() { Set<String> result=new HashSet<>(); for(String id:instagramTestRecipientIds.split(",")) if(!id.isBlank()) result.add(id.trim()); return result; }
   private static String optional(String value,String fallback) { return value==null || value.isBlank()?fallback:value; }
+  private String toJsonOrNull(Map<String,String> value) { if (value==null || value.isEmpty()) return null; try { return json.writeValueAsString(value); } catch (Exception e) { return null; } }
   private static String encode(String value) { return URLEncoder.encode(value, StandardCharsets.UTF_8); }
   private static ResponseEntity<Map<String,Object>> unavailable(String message) { return ResponseEntity.status(503).body(Map.of("error", message, "external_service", true)); }
 
-  record CheckoutIn(long creatorId,long productId,String provider) {}
+  record CheckoutIn(long creatorId,long productId,String provider,String buyerEmail,String buyerName,Map<String,String> fieldResponses,Long slotId,Long planId) {}
   record RazorpayReturn(String orderId,String paymentId,String signature) {}
   record InstagramMessage(String recipientId,String text) {}
   record ProviderSession(String id,String redirectUrl) {}

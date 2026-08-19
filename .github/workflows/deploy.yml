@@ -1,82 +1,45 @@
 name: Deploy backend
+
+# Simple single-server deployment: SSH into the VM, pull the published GHCR
+# image for the given commit SHA, and restart the backend container via
+# docker compose. Replaces the previous EKS/multi-region workflow, which
+# required a self-hosted runner inside a private VPC — not needed for this
+# lighter-weight target. See infrastructure/production/ for the compose file.
+
 on:
   workflow_dispatch:
     inputs:
-      stage: { type: choice, options: [dev, preprod, prod], required: true }
-      region: { type: choice, options: [region-a, region-b, region-c], required: true }
-      image_tag: { required: true, description: Immutable Git SHA, without sha- prefix }
-      change_ticket: { required: false, description: Required for preprod and prod promotion }
+      image_tag:
+        description: Immutable Git SHA (without sha- prefix) to deploy
+        required: true
 
 permissions:
   contents: read
-  id-token: write
-  packages: read
 
 jobs:
   deploy:
-    # EKS API endpoints are private. Register this runner inside the VPC or a connected network.
-    runs-on: [self-hosted, linux, aws-private]
-    environment: ${{ inputs.stage }}
+    runs-on: ubuntu-latest
+    environment: prod
     concurrency:
-      group: backend-${{ inputs.stage }}-${{ inputs.region }}
+      group: backend-prod
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
-      - name: Validate promotion inputs
-        shell: bash
+      - name: Validate image tag
         run: |
           test "${#IMAGE_TAG}" -eq 40
           [[ "$IMAGE_TAG" =~ ^[0-9a-f]{40}$ ]]
-          if [[ "$STAGE" != dev && -z "$CHANGE_TICKET" ]]; then
-            echo "A change ticket is required for preprod/prod." >&2
-            exit 1
-          fi
         env:
           IMAGE_TAG: ${{ inputs.image_tag }}
-          STAGE: ${{ inputs.stage }}
-          CHANGE_TICKET: ${{ inputs.change_ticket }}
-      - name: Resolve regional cluster
-        id: target
-        shell: bash
-        run: |
-          case "$TARGET" in
-            region-a) aws_region="$AWS_REGION_A"; cluster="$EKS_CLUSTER_A" ;;
-            region-b) aws_region="$AWS_REGION_B"; cluster="$EKS_CLUSTER_B" ;;
-            region-c) aws_region="$AWS_REGION_C"; cluster="$EKS_CLUSTER_C" ;;
-            *) exit 2 ;;
-          esac
-          test -n "$aws_region"
-          test -n "$cluster"
-          echo "aws_region=$aws_region" >> "$GITHUB_OUTPUT"
-          echo "cluster=$cluster" >> "$GITHUB_OUTPUT"
-        env:
-          TARGET: ${{ inputs.region }}
-          AWS_REGION_A: ${{ vars.AWS_REGION_A }}
-          AWS_REGION_B: ${{ vars.AWS_REGION_B }}
-          AWS_REGION_C: ${{ vars.AWS_REGION_C }}
-          EKS_CLUSTER_A: ${{ vars.EKS_CLUSTER_A }}
-          EKS_CLUSTER_B: ${{ vars.EKS_CLUSTER_B }}
-          EKS_CLUSTER_C: ${{ vars.EKS_CLUSTER_C }}
-      - uses: aws-actions/configure-aws-credentials@v4
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1
         with:
-          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: ${{ steps.target.outputs.aws_region }}
-      - name: Obtain short-lived cluster credential
-        run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$CLUSTER"
-        env:
-          AWS_REGION: ${{ steps.target.outputs.aws_region }}
-          CLUSTER: ${{ steps.target.outputs.cluster }}
-      - name: Apply and promote immutable image
-        shell: bash
-        run: |
-          kubectl apply -k "deploy/overlays/$TARGET"
-          repository="$IMAGE_REPOSITORY"
-          if [[ -z "$repository" ]]; then
-            repository="ghcr.io/${GITHUB_REPOSITORY_OWNER}/creator-link-store-backend"
-          fi
-          kubectl -n creator-store set image deployment/creator-store-api "api=${repository}:sha-${IMAGE_TAG}"
-          kubectl -n creator-store rollout status deployment/creator-store-api --timeout=240s
-        env:
-          TARGET: ${{ inputs.region }}
-          IMAGE_TAG: ${{ inputs.image_tag }}
-          IMAGE_REPOSITORY: ${{ vars.BACKEND_IMAGE_REPOSITORY }}
+          host: ${{ secrets.DEPLOY_SSH_HOST }}
+          username: ${{ secrets.DEPLOY_SSH_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            cd ~/creator-link-store-infrastructure/production
+            export BACKEND_IMAGE="ghcr.io/${{ github.repository_owner }}/creator-link-store-backend:sha-${{ inputs.image_tag }}"
+            docker compose pull creator-store-api
+            docker compose up -d creator-store-api
+            docker compose exec -T creator-store-api wget -qO- http://localhost:8080/health

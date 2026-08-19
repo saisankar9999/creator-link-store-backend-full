@@ -1,5 +1,8 @@
 server:
   port: ${PORT:8080}
+app:
+  allowed-origins: ${APP_ALLOWED_ORIGINS:http://localhost:5173,http://localhost:3000}
+  storage-dir: ${APP_STORAGE_DIR:./data/uploads}
 spring:
   datasource:
     url: ${DB_URL:jdbc:postgresql://localhost:5432/creatorstore}
