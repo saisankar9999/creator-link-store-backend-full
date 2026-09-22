@@ -229,6 +229,36 @@ class CreatorController {
     return ResponseEntity.status(201).body(Map.of("id", fileId, "file_name", safeName));
   }
 
+  @PostMapping("/api/v1/products/{id}/thumbnail") ResponseEntity<?> uploadThumbnail(@PathVariable long id, @RequestParam("file") MultipartFile file, HttpServletRequest request) throws IOException {
+    long creatorId = creatorId(request);
+    if (db.queryForList("select id from products where id=? and creator_id=?", id, creatorId).isEmpty())
+      return ResponseEntity.status(404).body(Map.of("error", "Product not found."));
+    if (file.isEmpty()) return ResponseEntity.badRequest().body(Map.of("error", "An image is required."));
+    if (file.getSize() > 8L * 1024 * 1024) return ResponseEntity.badRequest().body(Map.of("error", "Image must be 8MB or smaller."));
+    String contentType = file.getContentType();
+    if (contentType == null || !contentType.startsWith("image/"))
+      return ResponseEntity.badRequest().body(Map.of("error", "File must be an image."));
+    String ext = switch (contentType) { case "image/png" -> ".png"; case "image/webp" -> ".webp"; case "image/gif" -> ".gif"; default -> ".jpg"; };
+    String objectKey = "thumb_"+UUID.randomUUID()+ext;
+    Path dir = Path.of(storageDir).toAbsolutePath().normalize().resolve("thumbnails");
+    Files.createDirectories(dir);
+    Path dest = dir.resolve(objectKey).normalize();
+    if (!dest.startsWith(dir)) return ResponseEntity.badRequest().body(Map.of("error", "Invalid file name."));
+    file.transferTo(dest);
+    String url = "/api/public/thumbnails/"+objectKey;
+    db.update("update products set thumbnail_url=? where id=?", url, id);
+    return ResponseEntity.ok(Map.of("thumbnail_url", url));
+  }
+
+  @GetMapping("/api/public/thumbnails/{key}") ResponseEntity<?> serveThumbnail(@PathVariable String key) throws IOException {
+    Path dir = Path.of(storageDir).toAbsolutePath().normalize().resolve("thumbnails");
+    Path path = dir.resolve(key).normalize();
+    if (!path.startsWith(dir) || !Files.exists(path)) return ResponseEntity.notFound().build();
+    byte[] bytes = Files.readAllBytes(path);
+    String contentType = Files.probeContentType(path);
+    return ResponseEntity.ok().contentType(contentType!=null?MediaType.parseMediaType(contentType):MediaType.APPLICATION_OCTET_STREAM).body(bytes);
+  }
+
   @GetMapping("/api/v1/products/{id}/files") List<Map<String,Object>> listProductFiles(@PathVariable long id, HttpServletRequest request) {
     long creatorId = creatorId(request);
     if (db.queryForList("select id from products where id=? and creator_id=?", id, creatorId).isEmpty()) return List.of();
@@ -450,6 +480,81 @@ class CreatorController {
     return ResponseEntity.ok(Map.of("imported", imported, "skipped", skipped));
   }
 
+  @PostMapping("/api/v1/landing-pages") ResponseEntity<?> addLandingPage(@RequestBody LandingPageIn x, HttpServletRequest request) {
+    long creatorId = creatorId(request);
+    String slug = text(x.slug()).trim().toLowerCase().replaceAll("[^a-z0-9-]", "-");
+    if (slug.isBlank() || x.title()==null || x.title().isBlank())
+      return ResponseEntity.badRequest().body(Map.of("error", "slug and title are required"));
+    try {
+      db.update("insert into landing_pages(creator_id,slug,title,headline,body) values(?,?,?,?,?)",
+          creatorId, slug, x.title(), x.headline()==null?"":x.headline(), x.body()==null?"":x.body());
+    } catch (DataIntegrityViolationException duplicate) {
+      return ResponseEntity.status(409).body(Map.of("error", "You already have a landing page with that slug."));
+    }
+    return ResponseEntity.status(201).body(Map.of("added", true, "slug", slug));
+  }
+
+  @GetMapping("/api/v1/landing-pages") List<Map<String,Object>> listLandingPages(HttpServletRequest request) {
+    long creatorId = creatorId(request);
+    List<Map<String,Object>> pages = db.queryForList(
+        "select id,slug,title,headline,body,published,created_at from landing_pages where creator_id=? order by created_at desc", creatorId);
+    for (var p : pages) p.put("products", db.queryForList(
+        "select p.id,p.title from landing_page_products lp join products p on p.id=lp.product_id where lp.landing_page_id=? order by lp.position", p.get("id")));
+    return pages;
+  }
+
+  @PatchMapping("/api/v1/landing-pages/{id}") ResponseEntity<?> updateLandingPage(@PathVariable long id, @RequestBody Map<String,Object> body, HttpServletRequest request) {
+    long creatorId = creatorId(request);
+    if (db.queryForList("select id from landing_pages where id=? and creator_id=?", id, creatorId).isEmpty())
+      return ResponseEntity.status(404).body(Map.of("error", "Landing page not found."));
+    List<String> sets = new ArrayList<>(); List<Object> args = new ArrayList<>();
+    if (body.containsKey("title")) { sets.add("title=?"); args.add(text(body.get("title"))); }
+    if (body.containsKey("headline")) { sets.add("headline=?"); args.add(text(body.get("headline"))); }
+    if (body.containsKey("body")) { sets.add("body=?"); args.add(text(body.get("body"))); }
+    if (body.containsKey("published")) { sets.add("published=?"); args.add(Boolean.TRUE.equals(body.get("published"))); }
+    if (sets.isEmpty()) return ResponseEntity.badRequest().body(Map.of("error", "No editable fields were supplied."));
+    args.add(id); args.add(creatorId);
+    db.update("update landing_pages set "+String.join(",", sets)+" where id=? and creator_id=?", args.toArray());
+    return ResponseEntity.ok(Map.of("saved", true));
+  }
+
+  @PostMapping("/api/v1/landing-pages/{id}/products") ResponseEntity<?> addLandingPageProduct(@PathVariable long id, @RequestBody Map<String,Object> body, HttpServletRequest request) {
+    long creatorId = creatorId(request);
+    if (db.queryForList("select id from landing_pages where id=? and creator_id=?", id, creatorId).isEmpty())
+      return ResponseEntity.status(404).body(Map.of("error", "Landing page not found."));
+    long productId = longValue(body.get("productId"));
+    if (db.queryForList("select id from products where id=? and creator_id=?", productId, creatorId).isEmpty())
+      return ResponseEntity.badRequest().body(Map.of("error", "Product not found."));
+    db.update("insert into landing_page_products(landing_page_id,product_id,position) values(?,?,?) on conflict do nothing",
+        id, productId, count("select count(*) from landing_page_products where landing_page_id=?", id));
+    return ResponseEntity.status(201).body(Map.of("added", true));
+  }
+
+  @GetMapping("/api/public/{handle}/p/{slug}") ResponseEntity<?> publicLandingPage(@PathVariable String handle, @PathVariable String slug) {
+    List<Map<String,Object>> creators = db.queryForList("select id,handle,display_name,bio from creators where handle=?", handle.toLowerCase());
+    if (creators.isEmpty()) return ResponseEntity.notFound().build();
+    long creatorId = number(creators.get(0).get("id"));
+    List<Map<String,Object>> pages = db.queryForList(
+        "select id,title,headline,body from landing_pages where creator_id=? and slug=? and published=true", creatorId, slug.toLowerCase());
+    if (pages.isEmpty()) return ResponseEntity.notFound().build();
+    Map<String,Object> page = pages.get(0);
+    List<Map<String,Object>> products = db.queryForList(
+        "select p.id,p.type,p.title,p.description,p.price_cents as price_subunits,p.thumbnail_url,s.currency "
+            + "from landing_page_products lp join products p on p.id=lp.product_id join stores s on s.creator_id=p.creator_id "
+            + "where lp.landing_page_id=? and p.status='published' order by lp.position", page.get("id"));
+    return ResponseEntity.ok(Map.of("creator", creators.get(0), "page", page, "products", products));
+  }
+
+  @PatchMapping("/api/v1/settings/store") ResponseEntity<?> updateStoreDesign(@RequestBody Map<String,Object> body, HttpServletRequest request) {
+    long creatorId = creatorId(request);
+    if (!body.containsKey("theme")) return ResponseEntity.badRequest().body(Map.of("error", "No editable fields were supplied."));
+    String theme = text(body.get("theme"));
+    if (!Set.of("bold","minimal","sunset","ocean","botanical","editorial").contains(theme))
+      return ResponseEntity.badRequest().body(Map.of("error", "Unsupported theme."));
+    db.update("update stores set theme=? where creator_id=?", theme, creatorId);
+    return ResponseEntity.ok(Map.of("saved", true));
+  }
+
   @PatchMapping("/api/v1/settings/profile") ResponseEntity<?> updateProfile(@RequestBody Map<String,Object> body, HttpServletRequest request) {
     long creatorId = creatorId(request);
     List<String> sets = new ArrayList<>(); List<Object> args = new ArrayList<>();
@@ -559,4 +664,5 @@ class CreatorController {
   record PlanIn(String name,int amountSubunits,String intervalName,int intervalCount) {}
   record ModuleIn(String title) {}
   record LessonIn(String title,String videoUrl,String content) {}
+  record LandingPageIn(String slug,String title,String headline,String body) {}
 }

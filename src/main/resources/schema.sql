@@ -14,7 +14,7 @@ create table if not exists stores (
   id bigserial primary key,
   creator_id bigint unique not null references creators(id) on delete cascade,
   title varchar(100) not null,
-  theme varchar(40) not null default 'violet',
+  theme varchar(40) not null default 'bold',
   currency char(3) not null default 'INR',
   published boolean not null default true,
   payouts_enabled boolean not null default false
@@ -354,6 +354,25 @@ create table if not exists lesson_progress (
   lesson_id bigint not null references course_lessons(id) on delete cascade,
   completed_at timestamptz not null default current_timestamp,
   unique(enrollment_id,lesson_id)
+);
+
+create table if not exists landing_pages (
+  id bigserial primary key,
+  creator_id bigint not null references creators(id) on delete cascade,
+  slug varchar(80) not null,
+  title varchar(120) not null,
+  headline varchar(280) not null default '',
+  body varchar(4000) not null default '',
+  published boolean not null default false,
+  created_at timestamptz not null default current_timestamp,
+  unique(creator_id,slug)
+);
+
+create table if not exists landing_page_products (
+  landing_page_id bigint not null references landing_pages(id) on delete cascade,
+  product_id bigint not null references products(id) on delete cascade,
+  position integer not null default 0,
+  primary key(landing_page_id,product_id)
 );
 
 create table if not exists sessions (
