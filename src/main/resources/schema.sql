@@ -43,6 +43,8 @@ create table if not exists products (
   created_at timestamptz not null default current_timestamp
 );
 
+alter table products add column if not exists subtitle varchar(200) not null default '';
+alter table products add column if not exists cta_label varchar(60) not null default 'Buy securely';
 alter table products add column if not exists type varchar(40) not null default 'digital-download';
 alter table products add column if not exists status varchar(20) not null default 'published';
 alter table products add column if not exists position integer not null default 0;

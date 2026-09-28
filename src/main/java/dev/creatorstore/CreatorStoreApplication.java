@@ -76,7 +76,7 @@ class CreatorController {
         "creator", creator,
         "store", stores.get(0),
         "links", db.queryForList("select id,title,url from links where creator_id=? and published=true order by position,id", id),
-        "products", db.queryForList("select id,type,title,description,price_cents as price_subunits,price_cents,thumbnail_url from products where creator_id=? and status='published' order by position,id", id)));
+        "products", db.queryForList("select id,type,title,subtitle,description,cta_label,price_cents as price_subunits,price_cents,thumbnail_url from products where creator_id=? and status='published' order by position,id", id)));
   }
 
   @RequestMapping(value="/api/v1/authentication/check-unique-taken", method=RequestMethod.OPTIONS)
@@ -144,7 +144,7 @@ class CreatorController {
   @GetMapping("/api/v1/store") Map<String,Object> store(HttpServletRequest request) {
     long creatorId = creatorId(request);
     return Map.of("store", first("select id,title,theme,currency,published,payouts_enabled from stores where creator_id=?", creatorId),
-        "products", db.queryForList("select id,type,title,description,price_cents as price_subunits,price_cents,status,position,thumbnail_url,fulfillment_url from products where creator_id=? order by position,id", creatorId),
+        "products", db.queryForList("select id,type,title,subtitle,description,cta_label,price_cents as price_subunits,price_cents,status,position,thumbnail_url,fulfillment_url from products where creator_id=? order by position,id", creatorId),
         "product_types", List.of("lead-magnet","digital-download","meeting","fulfillment","course","membership","webinar","community"));
   }
 
@@ -152,11 +152,13 @@ class CreatorController {
     long creatorId = creatorId(request);
     if (!Set.of("lead-magnet","digital-download","meeting","fulfillment","course","membership","webinar","community").contains(x.type()))
       return ResponseEntity.badRequest().body(Map.of("error", "unsupported product type"));
-    if (x.title()==null || x.title().isBlank() || x.description()==null || x.priceSubunits()<0)
-      return ResponseEntity.badRequest().body(Map.of("error", "title, description, and a non-negative priceSubunits are required"));
-    db.update("insert into products(creator_id,type,title,description,price_cents,status,position,fulfillment_url) values(?,?,?,?,?,?,?,?)", creatorId, x.type(), x.title(), x.description(), x.priceSubunits(), x.status()==null?"draft":x.status(), x.position(), x.fulfillmentUrl());
+    if (x.title()==null || x.title().isBlank() || x.priceSubunits()<0)
+      return ResponseEntity.badRequest().body(Map.of("error", "title and a non-negative priceSubunits are required"));
+    db.update("insert into products(creator_id,type,title,subtitle,description,cta_label,price_cents,status,position,fulfillment_url) values(?,?,?,?,?,?,?,?,?,?)",
+        creatorId, x.type(), x.title(), x.subtitle()==null?"":x.subtitle(), x.description()==null?"":x.description(),
+        (x.ctaLabel()==null||x.ctaLabel().isBlank())?"Buy securely":x.ctaLabel(), x.priceSubunits(), x.status()==null?"draft":x.status(), x.position(), x.fulfillmentUrl());
     long id = db.queryForObject("select max(id) from products where creator_id=?", Long.class, creatorId);
-    return ResponseEntity.status(201).body(first("select id,type,title,description,price_cents as price_subunits,price_cents,status,position from products where id=?", id));
+    return ResponseEntity.status(201).body(first("select id,type,title,subtitle,description,cta_label,price_cents as price_subunits,price_cents,status,position from products where id=?", id));
   }
 
   @PatchMapping("/api/v1/products/{id}") ResponseEntity<?> updateProduct(@PathVariable long id, @RequestBody Map<String,Object> body, HttpServletRequest request) {
@@ -165,7 +167,9 @@ class CreatorController {
       return ResponseEntity.status(404).body(Map.of("error", "Product not found."));
     List<String> sets = new ArrayList<>(); List<Object> args = new ArrayList<>();
     if (body.containsKey("title")) { sets.add("title=?"); args.add(text(body.get("title"))); }
+    if (body.containsKey("subtitle")) { sets.add("subtitle=?"); args.add(text(body.get("subtitle"))); }
     if (body.containsKey("description")) { sets.add("description=?"); args.add(text(body.get("description"))); }
+    if (body.containsKey("ctaLabel")) { sets.add("cta_label=?"); args.add(text(body.get("ctaLabel")).isBlank()?"Buy securely":text(body.get("ctaLabel"))); }
     if (body.containsKey("priceSubunits")) { sets.add("price_cents=?"); args.add((int) longValue(body.get("priceSubunits"))); }
     if (body.containsKey("status")) {
       String status = text(body.get("status"));
@@ -177,7 +181,7 @@ class CreatorController {
     if (sets.isEmpty()) return ResponseEntity.badRequest().body(Map.of("error", "No editable fields were supplied."));
     args.add(id); args.add(creatorId);
     db.update("update products set "+String.join(",", sets)+" where id=? and creator_id=?", args.toArray());
-    return ResponseEntity.ok(first("select id,type,title,description,price_cents as price_subunits,price_cents,status,position,thumbnail_url,fulfillment_url from products where id=?", id));
+    return ResponseEntity.ok(first("select id,type,title,subtitle,description,cta_label,price_cents as price_subunits,price_cents,status,position,thumbnail_url,fulfillment_url from products where id=?", id));
   }
 
   @GetMapping("/api/buyer/access/{token}") ResponseEntity<?> buyerAccess(@PathVariable String token) {
@@ -539,7 +543,7 @@ class CreatorController {
     if (pages.isEmpty()) return ResponseEntity.notFound().build();
     Map<String,Object> page = pages.get(0);
     List<Map<String,Object>> products = db.queryForList(
-        "select p.id,p.type,p.title,p.description,p.price_cents as price_subunits,p.thumbnail_url,s.currency "
+        "select p.id,p.type,p.title,p.subtitle,p.description,p.cta_label,p.price_cents as price_subunits,p.thumbnail_url,s.currency "
             + "from landing_page_products lp join products p on p.id=lp.product_id join stores s on s.creator_id=p.creator_id "
             + "where lp.landing_page_id=? and p.status='published' order by lp.position", page.get("id"));
     return ResponseEntity.ok(Map.of("creator", creators.get(0), "page", page, "products", products));
@@ -654,7 +658,7 @@ class CreatorController {
   private static long creatorId(HttpServletRequest request) { return (Long) request.getAttribute("creatorId"); }
 
   record Register(String handle,String displayName,String email,String phone,String password) {}
-  record ProductIn(String type,String title,String description,int priceSubunits,String status,int position,String fulfillmentUrl) {}
+  record ProductIn(String type,String title,String subtitle,String description,String ctaLabel,int priceSubunits,String status,int position,String fulfillmentUrl) {}
   record CustomerIn(String name,String email,String phone) {}
   record ClickIn(long linkId,String referrer) {}
   record LeadIn(long productId,String email) {}
