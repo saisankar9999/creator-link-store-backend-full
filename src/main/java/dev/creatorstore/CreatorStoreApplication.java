@@ -186,10 +186,10 @@ class CreatorController {
 
   @GetMapping("/api/buyer/access/{token}") ResponseEntity<?> buyerAccess(@PathVariable String token) {
     List<Map<String,Object>> rows = db.queryForList(
-        "select e.status as entitlement_status,e.granted_at,p.id as product_id,p.type,p.title,p.description,p.thumbnail_url,p.fulfillment_url,"
-            + "o.amount_cents as amount_subunits,o.created_at as purchased_at,c.display_name as creator_name,c.handle as creator_handle "
+        "select e.status as entitlement_status,e.granted_at,p.id as product_id,p.type,p.title,p.subtitle,p.description,p.thumbnail_url,p.fulfillment_url,"
+            + "o.amount_cents as amount_subunits,o.created_at as purchased_at,c.display_name as creator_name,c.handle as creator_handle,s.theme "
             + "from entitlements e join products p on p.id=e.product_id join orders o on o.id=e.order_id join creators c on c.id=e.creator_id "
-            + "where e.access_token=?", token);
+            + "join stores s on s.creator_id=c.id where e.access_token=?", token);
     if (rows.isEmpty()) return ResponseEntity.status(404).body(Map.of("error", "Access link not found."));
     Map<String,Object> result = new LinkedHashMap<>(rows.get(0));
     if ("digital-download".equals(result.get("type")))
@@ -316,7 +316,38 @@ class CreatorController {
   }
 
   @GetMapping("/api/public/products/{id}/slots") List<Map<String,Object>> listOpenSlots(@PathVariable long id) {
-    return db.queryForList("select id,starts_at,ends_at from bookings where product_id=? and status='open' and starts_at > current_timestamp order by starts_at limit 50", id);
+    return db.queryForList("select id,starts_at,ends_at from bookings where product_id=? and status='open' and starts_at > current_timestamp order by starts_at limit 500", id);
+  }
+
+  @PostMapping("/api/v1/products/{id}/availability-pattern") ResponseEntity<?> generateAvailability(@PathVariable long id, @RequestBody AvailabilityPatternIn x, HttpServletRequest request) {
+    long creatorId = creatorId(request);
+    if (db.queryForList("select id from products where id=? and creator_id=? and type='meeting'", id, creatorId).isEmpty())
+      return ResponseEntity.status(404).body(Map.of("error", "Meeting product not found."));
+    if (x.daysOfWeek()==null || x.daysOfWeek().isEmpty())
+      return ResponseEntity.badRequest().body(Map.of("error", "Pick at least one day of the week."));
+    java.time.LocalTime start, end;
+    try { start = java.time.LocalTime.parse(x.startTime()); end = java.time.LocalTime.parse(x.endTime()); }
+    catch (Exception e) { return ResponseEntity.badRequest().body(Map.of("error", "startTime/endTime must be HH:mm.")); }
+    if (!end.isAfter(start)) return ResponseEntity.badRequest().body(Map.of("error", "endTime must be after startTime."));
+    int duration = x.slotMinutes()>0 ? x.slotMinutes() : 30;
+    int weeks = x.weeksAhead()>0 ? Math.min(x.weeksAhead(), 12) : 4;
+    Set<Integer> days = new HashSet<>(x.daysOfWeek());
+    long scheduleId = getOrCreateSchedule(creatorId);
+    java.time.LocalDate today = java.time.LocalDate.now(java.time.ZoneOffset.UTC);
+    int created = 0;
+    for (int d = 0; d < weeks * 7; d++) {
+      java.time.LocalDate date = today.plusDays(d);
+      if (!days.contains(date.getDayOfWeek().getValue())) continue;
+      for (java.time.LocalTime t = start; !t.plusMinutes(duration).isAfter(end); t = t.plusMinutes(duration)) {
+        java.sql.Timestamp slotStart = java.sql.Timestamp.valueOf(java.time.LocalDateTime.of(date, t));
+        java.sql.Timestamp slotEnd = java.sql.Timestamp.valueOf(java.time.LocalDateTime.of(date, t.plusMinutes(duration)));
+        if (db.queryForList("select id from bookings where product_id=? and starts_at=?", id, slotStart).isEmpty()) {
+          db.update("insert into bookings(schedule_id,product_id,starts_at,ends_at,status) values(?,?,?,?,'open')", scheduleId, id, slotStart, slotEnd);
+          created++;
+        }
+      }
+    }
+    return ResponseEntity.ok(Map.of("created", created));
   }
 
   private long getOrCreateSchedule(long creatorId) {
@@ -363,6 +394,12 @@ class CreatorController {
     long creatorId = creatorId(request);
     if (db.queryForList("select id from products where id=? and creator_id=?", id, creatorId).isEmpty()) return List.of();
     return db.queryForList("select id,name,amount_cents as amount_subunits,interval_name,interval_count from product_payment_plans where product_id=? order by id", id);
+  }
+
+  @GetMapping("/api/public/products/{id}/webinar-sessions") List<Map<String,Object>> publicWebinarSessions(@PathVariable long id) {
+    return db.queryForList(
+        "select w.id,w.starts_at,w.ends_at,w.capacity,(select count(*) from webinar_registrations r where r.session_id=w.id) as registered "
+            + "from webinar_sessions w where w.product_id=? and w.starts_at > current_timestamp order by w.starts_at limit 50", id);
   }
 
   @GetMapping("/api/public/products/{id}/plans") List<Map<String,Object>> publicPlans(@PathVariable long id) {
@@ -546,7 +583,8 @@ class CreatorController {
         "select p.id,p.type,p.title,p.subtitle,p.description,p.cta_label,p.price_cents as price_subunits,p.thumbnail_url,s.currency "
             + "from landing_page_products lp join products p on p.id=lp.product_id join stores s on s.creator_id=p.creator_id "
             + "where lp.landing_page_id=? and p.status='published' order by lp.position", page.get("id"));
-    return ResponseEntity.ok(Map.of("creator", creators.get(0), "page", page, "products", products));
+    String theme = String.valueOf(first("select theme from stores where creator_id=?", creatorId).getOrDefault("theme", "bold"));
+    return ResponseEntity.ok(Map.of("creator", creators.get(0), "page", page, "products", products, "theme", theme));
   }
 
   @PatchMapping("/api/v1/settings/store") ResponseEntity<?> updateStoreDesign(@RequestBody Map<String,Object> body, HttpServletRequest request) {
@@ -669,4 +707,5 @@ class CreatorController {
   record ModuleIn(String title) {}
   record LessonIn(String title,String videoUrl,String content) {}
   record LandingPageIn(String slug,String title,String headline,String body) {}
+  record AvailabilityPatternIn(List<Integer> daysOfWeek,String startTime,String endTime,int slotMinutes,int weeksAhead) {}
 }

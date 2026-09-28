@@ -26,7 +26,7 @@ public class OrderFulfillmentService {
   @Transactional
   public String recordPaidOrder(String provider, String providerSessionId) {
     List<Map<String, Object>> rows = db.queryForList(
-        "select id,creator_id,product_id,amount_subunits,buyer_email,buyer_name,order_id,field_responses,slot_id,plan_id from checkout_sessions "
+        "select id,creator_id,product_id,amount_subunits,buyer_email,buyer_name,order_id,field_responses,slot_id,plan_id,webinar_session_id from checkout_sessions "
             + "where provider=? and provider_session_id=? for update",
         provider, providerSessionId);
     if (rows.isEmpty()) return null;
@@ -73,11 +73,16 @@ public class OrderFulfillmentService {
 
     String productType = db.queryForObject("select type from products where id=?", String.class, productId);
     if ("webinar".equals(productType)) {
-      List<Long> upcoming = db.query(
-          "select id from webinar_sessions where product_id=? and starts_at > current_timestamp order by starts_at limit 1",
-          (rs, i) -> rs.getLong("id"), productId);
-      if (!upcoming.isEmpty())
-        db.update("insert into webinar_registrations(session_id,customer_id,order_id) values(?,?,?)", upcoming.get(0), customerId, orderId);
+      Object chosenSessionId = session.get("webinar_session_id");
+      Long sessionId = chosenSessionId != null ? ((Number) chosenSessionId).longValue() : null;
+      if (sessionId == null) {
+        List<Long> upcoming = db.query(
+            "select id from webinar_sessions where product_id=? and starts_at > current_timestamp order by starts_at limit 1",
+            (rs, i) -> rs.getLong("id"), productId);
+        sessionId = upcoming.isEmpty() ? null : upcoming.get(0);
+      }
+      if (sessionId != null)
+        db.update("insert into webinar_registrations(session_id,customer_id,order_id) values(?,?,?)", sessionId, customerId, orderId);
     }
     if ("course".equals(productType))
       db.update("insert into course_enrollments(product_id,customer_id,order_id) values(?,?,?)", productId, customerId, orderId);

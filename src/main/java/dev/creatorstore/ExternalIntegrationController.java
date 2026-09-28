@@ -88,6 +88,10 @@ class ExternalIntegrationController {
       if (plans.isEmpty()) return ResponseEntity.badRequest().body(Map.of("error", "Plan not found for this product."));
       amount = ((Number) plans.get(0).get("amount_cents")).intValue();
     }
+    if (input.sessionId() != null) {
+      List<Map<String,Object>> sessions = db.queryForList("select id from webinar_sessions where id=? and product_id=?", input.sessionId(), input.productId());
+      if (sessions.isEmpty()) return ResponseEntity.badRequest().body(Map.of("error", "Session not found for this product."));
+    }
     if (amount <= 0) return ResponseEntity.badRequest().body(Map.of("error", "Free products do not use a payment gateway."));
     String provider = optional(input.provider(), defaultProvider).toLowerCase(Locale.ROOT);
     if (!Set.of("razorpay", "stripe").contains(provider)) return ResponseEntity.badRequest().body(Map.of("error", "provider must be razorpay or stripe"));
@@ -97,8 +101,8 @@ class ExternalIntegrationController {
     String checkoutId = UUID.randomUUID().toString();
     String fieldResponsesJson = toJsonOrNull(input.fieldResponses());
     try {
-      db.update("insert into checkout_sessions(id,creator_id,product_id,provider,idempotency_key,currency,amount_subunits,status,buyer_email,buyer_name,field_responses,slot_id,plan_id) values(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-          checkoutId, input.creatorId(), input.productId(), provider, idempotencyKey, currency, amount, "creating", input.buyerEmail().trim().toLowerCase(), optional(input.buyerName(), ""), fieldResponsesJson, input.slotId(), input.planId());
+      db.update("insert into checkout_sessions(id,creator_id,product_id,provider,idempotency_key,currency,amount_subunits,status,buyer_email,buyer_name,field_responses,slot_id,plan_id,webinar_session_id) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+          checkoutId, input.creatorId(), input.productId(), provider, idempotencyKey, currency, amount, "creating", input.buyerEmail().trim().toLowerCase(), optional(input.buyerName(), ""), fieldResponsesJson, input.slotId(), input.planId(), input.sessionId());
     } catch (DataIntegrityViolationException concurrentRequest) {
       return ResponseEntity.ok(db.queryForMap("select id,provider,provider_session_id,currency,amount_subunits,status from checkout_sessions where creator_id=? and idempotency_key=?", input.creatorId(), idempotencyKey));
     }
@@ -267,7 +271,7 @@ class ExternalIntegrationController {
   private static String encode(String value) { return URLEncoder.encode(value, StandardCharsets.UTF_8); }
   private static ResponseEntity<Map<String,Object>> unavailable(String message) { return ResponseEntity.status(503).body(Map.of("error", message, "external_service", true)); }
 
-  record CheckoutIn(long creatorId,long productId,String provider,String buyerEmail,String buyerName,Map<String,String> fieldResponses,Long slotId,Long planId) {}
+  record CheckoutIn(long creatorId,long productId,String provider,String buyerEmail,String buyerName,Map<String,String> fieldResponses,Long slotId,Long planId,Long sessionId) {}
   record RazorpayReturn(String orderId,String paymentId,String signature) {}
   record InstagramMessage(String recipientId,String text) {}
   record ProviderSession(String id,String redirectUrl) {}

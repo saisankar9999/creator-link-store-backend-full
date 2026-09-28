@@ -308,6 +308,8 @@ create table if not exists webinar_sessions (
   capacity integer not null default 0
 );
 
+alter table checkout_sessions add column if not exists webinar_session_id bigint references webinar_sessions(id);
+
 create table if not exists webinar_registrations (
   id bigserial primary key,
   session_id bigint not null references webinar_sessions(id) on delete cascade,
