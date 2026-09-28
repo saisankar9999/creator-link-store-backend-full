@@ -184,6 +184,18 @@ class CreatorController {
     return ResponseEntity.ok(first("select id,type,title,subtitle,description,cta_label,price_cents as price_subunits,price_cents,status,position,thumbnail_url,fulfillment_url from products where id=?", id));
   }
 
+  @DeleteMapping("/api/v1/products/{id}") ResponseEntity<?> deleteProduct(@PathVariable long id, HttpServletRequest request) {
+    long creatorId = creatorId(request);
+    if (db.queryForList("select id from products where id=? and creator_id=?", id, creatorId).isEmpty())
+      return ResponseEntity.status(404).body(Map.of("error", "Product not found."));
+    try {
+      db.update("delete from products where id=? and creator_id=?", id, creatorId);
+      return ResponseEntity.noContent().build();
+    } catch (DataIntegrityViolationException hasOrderHistory) {
+      return ResponseEntity.status(409).body(Map.of("error", "This product has existing orders or checkout history and can't be permanently deleted — archive it instead."));
+    }
+  }
+
   @GetMapping("/api/buyer/access/{token}") ResponseEntity<?> buyerAccess(@PathVariable String token) {
     List<Map<String,Object>> rows = db.queryForList(
         "select e.status as entitlement_status,e.granted_at,p.id as product_id,p.type,p.title,p.subtitle,p.description,p.thumbnail_url,p.fulfillment_url,"
